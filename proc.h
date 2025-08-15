@@ -177,3 +177,51 @@ void print_jobs() {
         current = current->next;
     }
 }
+
+job_t* get_most_recent_job(void) {
+    job_t* most_recent = NULL;
+    int max_id = -1;
+    
+    for (job_t* job = job_list; job != NULL; job = job->next) {
+        if (job->status != JOB_DONE && job->job_id > max_id) {
+            max_id = job->job_id;
+            most_recent = job;
+        }
+    }
+    
+    return most_recent;
+}
+
+job_t* get_most_recent_stopped_job() {
+    job_t* most_recent = NULL;
+    int max_id = -1;
+    
+    for (job_t* job = job_list; job != NULL; job = job->next) {
+        if ((job->status == JOB_STOPPED || job_is_stopped(job)) && job->job_id > max_id) {
+            max_id = job->job_id;
+            most_recent = job;
+        }
+    }
+    
+    return most_recent;
+}
+
+int count_processes_in_job(job_t* job) {
+    int count = 0;
+    for (int i = 0; i < job->process_counter; ++i) {
+        if (job->process_list[i]->status != JOB_DONE) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int all_processes_done(job_t* job) {
+    
+    for (int i = 0; i < job->process_counter; ++i) {
+        if (job->process_list[i]->status != JOB_DONE) {
+            return 0; 
+        }
+    }
+    return 1; 
+}

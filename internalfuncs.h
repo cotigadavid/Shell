@@ -14,6 +14,11 @@
 #define MAX_GLOBAL_PROCESSES 10000
 #define BUFFER_SIZE 4096
 
+static int shell_interactive = 0;
+static pid_t shell_pgid = 0;
+static int shell_tty = -1;
+static volatile sig_atomic_t fg_pgid = 0;
+
 struct command_inter {
     size_t argc;
     char* argv[MAX_ARGS];
@@ -58,8 +63,8 @@ internal_pair internals[] = {
     {"ls", internal_ls, 0},      // can run in child
     {"cat", internal_cat, 0},    // can run in child
     {"jobs", internal_jobs, 0},    // can run in child
-    {"fg", internal_fg, 0},    // can run in child
-    {"bg", internal_bg, 0},    // can run in child
+    {"fg", internal_fg, 1},    // MUST run in parent
+    {"bg", internal_bg, 1},    // MUST run in parent
     {NULL, NULL, 0}
 };
 
@@ -187,7 +192,16 @@ void internal_fg(const command* cmd) {
     job_t* job = NULL;
 
     if (cmd->argc > 1) {
-        job = find_job_by_id((long)*cmd->argv[1] - 48);
+        char* job_str = cmd->argv[1];
+        int job_id;
+        
+        if (job_str[0] == '%') {
+            job_id = atoi(job_str + 1);
+        } else {
+            job_id = atoi(job_str);
+        }
+        
+        job = find_job_by_id(job_id);
     }
     else {
         fprintf(stderr, "fg: no job id\n");
@@ -198,13 +212,22 @@ void internal_fg(const command* cmd) {
         return;
     }
 
+    if (job->status == JOB_RUNNING && fg_pgid == job->pgid) {
+        fprintf(stderr, "fg: job already in foreground\n");
+        return;
+    }
+
+    fg_pgid = job->pgid;
+
     if (kill(-job->pgid, SIGCONT) < 0) {
         perror("kill SIGCONT");
+        fg_pgid = 0;
         return;
     }
 
     if (tcsetpgrp(STDIN_FILENO, job->pgid) < 0) {
         perror("tcsetpgrp");
+        fg_pgid = 0;
         return;
     }
 
@@ -214,45 +237,73 @@ void internal_fg(const command* cmd) {
 
     int status;
     pid_t pid;
+    int processes_remaining = count_processes_in_job(job); 
     
-    // Wait for all processes in this job
-    while (job->status != JOB_DONE && !job_is_stopped(job)) {
-        pid = waitpid(-job->pgid, &status, WUNTRACED);
-        if (pid > 0) {
-            // Handle status change
-            if (WIFSTOPPED(status)) {
-                update_job_status(job, pid, JOB_STOPPED);
-                break;
-            } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
-                update_job_status(job, pid, JOB_DONE);
-            }
+    while (processes_remaining > 0) {
+        pid = waitpid(-1, &status, WUNTRACED);
+        
+        if (pid < 0) {
+            if (errno == EINTR) continue;
+            if (errno == ECHILD) break;
+            perror("waitpid");
+            break;
+        }
+        
+        if (pid == 0) continue;
+        
+        pid_t process_pgid = get_pgid_of_process(pid);
+        if (process_pgid != job->pgid) continue; 
+        
+        if (WIFSTOPPED(status)) {
+            update_job_status(job, pid, JOB_STOPPED);
+            printf("\n[%d]+  Stopped\t%s\n", job->job_id, job->command_line);
+            break; 
+        } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            update_job_status(job, pid, JOB_DONE);
+            processes_remaining--;
         }
     }
     
-    if (tcsetpgrp(STDIN_FILENO, getpid()) < 0) {
-        perror("tcsetpgrp restore");
+    if (shell_interactive) {
+        if (tcsetpgrp(shell_tty, shell_pgid) < 0) {
+            perror("tcsetpgrp restore");
+        }
     }
+    fg_pgid = 0;
     
-    //REMOVE JOB WHEN COMPLETED
+    if (job->status == JOB_DONE || all_processes_done(job)) {
+        remove_job(job);
+    }
 }
 
 void internal_bg(const command* cmd) {
     job_t* job = NULL;
 
     if (cmd->argc > 1) {
-        job = find_job_by_id(cmd->argv[1]);
-    }
-    else {
-        fprintf(stderr, "bg: no job id\n");
+        char* job_str = cmd->argv[1];
+        int job_id;
+        
+        if (job_str[0] == '%') {
+            job_id = atoi(job_str + 1);
+        } else {
+            job_id = atoi(job_str);
+        }
+        
+        job = find_job_by_id(job_id);
+    } else {
+        if (!job) {
+            fprintf(stderr, "bg: no current job\n");
+            return;
+        }
     }
 
     if (!job) {
-        fprintf(stderr, "bg: no job found\n");
+        fprintf(stderr, "bg: no such job\n");
         return;
     }
     
-    if (job->status == JOB_RUNNING) {
-        printf("job is already running\n");
+    if (job->status != JOB_STOPPED && !job_is_stopped(job)) {
+        printf("bg: job [%d] already running\n", job->job_id);
         return;
     }
     

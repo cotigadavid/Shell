@@ -155,46 +155,83 @@ static void duplicate_fd(command* cmd) {
     }
 }
 
+static void give_terminal_to(pid_t pgid) {
+    if (!shell_interactive) return;
+    if (pgid <= 0) return;
+    tcsetpgrp(shell_tty, pgid);
+}
+
+static void reclaim_terminal(void) {
+    if (!shell_interactive) return;
+    tcsetpgrp(shell_tty, shell_pgid);
+}
+
 static volatile sig_atomic_t child_status_changed = 0;
 
 void sigchld_handler(int sig) {
+    (void)sig;
     child_status_changed = 1;
 }
 
-void install_sigchld_handler(void) {
+static void sigint_handler(int sig) {
+    (void)sig;
+    pid_t pgid = fg_pgid;
+    if (pgid > 0) killpg(pgid, SIGINT);
+}
+
+static void sigtstp_handler(int sig) {
+    (void)sig;
+    pid_t pgid = fg_pgid;
+    if (pgid > 0) killpg(pgid, SIGTSTP);
+}
+
+static void ignore_signal(int signo) {
     struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
+    sa.sa_handler = SIG_IGN;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(1);
-    }
+    sigaction(signo, &sa, NULL);
+}
+
+static void set_handler(int signo, void (*handler)(int)) {
+    struct sigaction sa;
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(signo, &sa, NULL);
+}
+
+static void install_all_shell_handlers(void) {
+    set_handler(SIGCHLD, sigchld_handler);
+
+    set_handler(SIGINT,  sigint_handler);
+    set_handler(SIGTSTP, sigtstp_handler);
+
+    ignore_signal(SIGTTOU);
+    ignore_signal(SIGTTIN);
 }
 
 void check_child_status(void) {
     if (!child_status_changed) {
-        return;  // Nothing to do
+        return;
     }
     
-    child_status_changed = 0;  // Reset flag
+    child_status_changed = 0;
     
     int status;
     pid_t pid;
     
-    // Process all available child status changes
     while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
         pid_t pgid = get_pgid_of_process(pid);
         if (pgid == -1) {
-            continue;  // Skip if we can't get process group
+            continue; 
         }
         
         job_t* job = find_job_by_pgid(pgid);
         if (job == NULL) {
-            continue;  // Not a background job we're tracking
+            continue;
         }
 
-        // Update job status
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             update_job_status(job, pid, JOB_DONE);
         } else if (WIFSTOPPED(status)) {
@@ -205,8 +242,23 @@ void check_child_status(void) {
     }
 }
 
-static void execute_pipeline(pipeline* curr_pipeline) {
+static void setup_child_signals_and_pgrp(pid_t pg_leader_pgid, int is_fg) {
 
+    signal(SIGINT,  SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);
+    signal(SIGTTOU, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+
+    if (pg_leader_pgid == 0) {
+        setpgid(0, 0);
+    } else {
+        setpgid(0, pg_leader_pgid);
+    }
+
+}
+
+static void execute_pipeline(pipeline* curr_pipeline) {
     int pipefds[2 * (curr_pipeline->cmdc - 1)];
     pid_t pids[curr_pipeline->cmdc];
 
@@ -216,6 +268,14 @@ static void execute_pipeline(pipeline* curr_pipeline) {
             exit(1);
         }
     }
+
+    int is_fg = (curr_pipeline->background == 0);
+    pid_t pg_leader = 0;
+
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
 
     for (size_t i = 0; i < curr_pipeline->cmdc; ++i) {
         command* cmd = curr_pipeline->cmds[i];
@@ -227,8 +287,9 @@ static void execute_pipeline(pipeline* curr_pipeline) {
         }
 
         if (pid == 0) { // CHILD
-            // Put child in process group
-            setpgid(0, (i == 0) ? 0 : pids[0]);
+            sigprocmask(SIG_SETMASK, &oldmask, NULL);
+            
+            setup_child_signals_and_pgrp((i == 0) ? 0 : pg_leader, is_fg);
 
             // Set up pipes
             if (i > 0) dup2(pipefds[(i - 1) * 2], STDIN_FILENO);
@@ -251,44 +312,180 @@ static void execute_pipeline(pipeline* curr_pipeline) {
         } 
         else { // PARENT
             pids[i] = pid;
-            setpgid(pid, (i == 0) ? pid : pids[0]);
+            if (i == 0) {
+                setpgid(pid, pid);
+                pg_leader = pid;
+            } else {
+                setpgid(pid, pg_leader);
+            }
         }
     }
 
     for (size_t i = 0; i < 2 * (curr_pipeline->cmdc - 1); ++i)
         close(pipefds[i]);
 
-    if (curr_pipeline->background == 0) {
-        // Foreground job: wait for all
-        for (size_t i = 0; i < curr_pipeline->cmdc; ++i) {
-            int status;
-            waitpid(pids[i], &status, 0);
+    job_t* job = NULL;
+    if (!is_fg) {
+        job = add_job(pg_leader, curr_pipeline->buffer, curr_pipeline);
+        for (int i = 0; i < curr_pipeline->cmdc; ++i) {
+            add_process_to_job(pg_leader, pids[i]);
         }
-    } else {
-        // Background job
-        int j_id = add_job(pids[0], curr_pipeline->buffer, curr_pipeline)->job_id;
-        printf("[%d] PGID: %ld\n", j_id, (long)pids[0]);
-        for (size_t i = 0; i < curr_pipeline->cmdc; ++i)
-            add_process_to_job(pids[0], pids[i]);
+        printf("[%d] PGID: %ld\n", job->job_id, (long)pg_leader);
+    }
+
+    sigprocmask(SIG_SETMASK, &oldmask, NULL);
+
+    if (is_fg) {
+        fg_pgid = pg_leader;
+        give_terminal_to(pg_leader);
+
+        int alive = curr_pipeline->cmdc;
+        while (alive > 0) {
+            int status = 0;
+            pid_t w = waitpid(-1, &status, WUNTRACED);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                if (errno == ECHILD) break;
+                perror("waitpid");
+                break;
+            }
+            if (w == 0) continue;
+
+            pid_t wpgid = get_pgid_of_process(w);
+            if (wpgid != pg_leader) continue; 
+
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                alive--;
+            } else if (WIFSTOPPED(status)) {
+                if (!job) {
+                    job = add_job(pg_leader, curr_pipeline->buffer, curr_pipeline);
+                    for (int i = 0; i < curr_pipeline->cmdc; ++i) {
+                        add_process_to_job(pg_leader, pids[i]);
+                    }
+                    printf("\n[%d]+  Stopped\t%s\n", job->job_id, curr_pipeline->buffer);
+                }
+                update_job_status(job, w, JOB_STOPPED);
+                break;
+            }
+        }
+
+        reclaim_terminal();
+        fg_pgid = 0;
     }
 }
 
+static void execute_single_command(pipeline* curr_pipeline) {
+    command* cmd = curr_pipeline->cmds[0];
+    
+    if (cmd->argc == 0) return;
+    
+    // Check if parent built-in
+    if (is_parent_builtin(cmd->argv[0])) {
+        internal_func func = get_internal_func(cmd->argv[0]);
+        if (func != NULL) {
+            func(cmd);
+            return;
+        }
+    }
+    
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+        return;
+    }
+
+    if (pid == 0) {
+        // CHILD
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+        
+        int is_fg = (curr_pipeline->background == 0);
+        setup_child_signals_and_pgrp(0, is_fg);
+        duplicate_fd(cmd);
+
+        internal_func func = get_internal_func(cmd->argv[0]);
+        if (func != NULL) {
+            func(cmd);
+            _exit(EXIT_SUCCESS);
+        }
+        execvp(cmd->argv[0], cmd->argv);
+        perror("execvp failed");
+        _exit(EXIT_FAILURE);
+    } else {
+        // PARENT
+        setpgid(pid, pid);
+
+        job_t* job = NULL;
+        if (curr_pipeline->background != 0) {
+            job = add_job(pid, curr_pipeline->buffer, curr_pipeline);
+            add_process_to_job(pid, pid);
+            printf("[%d] PGID: %ld\n", job->job_id, (long)pid);
+        }
+
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+
+        if (curr_pipeline->background == 0) {
+            fg_pgid = pid;
+            give_terminal_to(pid);
+
+            int status;
+            while (1) {
+                pid_t w = waitpid(pid, &status, WUNTRACED);
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    perror("waitpid");
+                    break;
+                }
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    // done
+                    break;
+                }
+                if (WIFSTOPPED(status)) {
+                    if (!job) {
+                        job = add_job(pid, curr_pipeline->buffer, curr_pipeline);
+                        add_process_to_job(pid, pid);
+                        printf("\n[%d]+  Stopped\t%s\n", job->job_id, curr_pipeline->buffer);
+                    }
+                    update_job_status(job, pid, JOB_STOPPED);
+                    break;
+                }
+            }
+
+            reclaim_terminal();
+            fg_pgid = 0;
+        }
+    }
+}
 
 int main() {
-    // struct sigaction sa;
-    // sa.sa_handler = sigchld_handler;
-    // sigemptyset(&sa.sa_mask);
-    // sa.sa_flags = SA_RESTART;
-    // sigaction(SIGCHLD, &sa, NULL);
+    shell_tty = STDIN_FILENO;
+    shell_interactive = isatty(shell_tty);
 
-    install_sigchld_handler();
+    if (shell_interactive) {
+        shell_pgid = getpgrp();
+        if (getpid() != shell_pgid) {
+            if (setpgid(0, 0) < 0) {
+                perror("setpgid");
+                exit(1);
+            }
+            shell_pgid = getpgrp();
+        }
+
+        tcsetpgrp(shell_tty, shell_pgid);
+    }
+
+    install_all_shell_handlers();
 
     char* buffer = NULL;
     size_t bufferSize = 0;
     ssize_t lineLen;
 
     while (1) {
-
         printf("shell:~");
         internal_pwd(&command_default);
         printf("$ ");
@@ -318,62 +515,12 @@ int main() {
         if (curr_pipeline == NULL) continue;
 
         if (curr_pipeline->cmdc == 1) {
-            command* cmd = curr_pipeline->cmds[0];
-            
-            if (cmd->argc > 0) {
-                // Check if parent built-in
-                if (is_parent_builtin(cmd->argv[0])) {
-                    internal_func func = get_internal_func(cmd->argv[0]);
-                    if (func != NULL) {
-                        func(cmd);
-                        free_pipeline_mem(curr_pipeline);
-                        continue;
-                    }
-                }
-                
-                internal_func func = get_internal_func(cmd->argv[0]);
-                
-                pid_t pid = fork();
-                if (pid < 0) {
-                    perror("fork failed");
-                    free_pipeline_mem(curr_pipeline);
-                    continue;
-                }
-                
-                if (pid == 0) {  //child
-                    duplicate_fd(cmd);
-                    setpgid(0, 0);
-
-                    if (func != NULL) {
-                        func(cmd);
-                        exit(EXIT_SUCCESS);
-                    }
-
-                    execvp(cmd->argv[0], cmd->argv);
-                    perror("execvp failed");
-                    exit(EXIT_FAILURE);
-                } else {
-                    // Parent process
-                    setpgid(pid, pid);
-
-                    if (curr_pipeline->background == 0) {
-                        int status;
-                        waitpid(pid, &status, 0);
-                    }
-                    else {
-                        int j_id = add_job(pid, curr_pipeline->buffer, curr_pipeline)->job_id;
-                        add_process_to_job(pid, pid);
-                        printf("[%d] PGID: %ld\n", j_id, (long)pid);
-                    }
-                    free_pipeline_mem(curr_pipeline);
-                    continue;
-                }
-            }
+            execute_single_command(curr_pipeline);
+        } else {
+            execute_pipeline(curr_pipeline);
         }
 
         check_child_status();
-
-        execute_pipeline(curr_pipeline);
         free_pipeline_mem(curr_pipeline);
     }
 
