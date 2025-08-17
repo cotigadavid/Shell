@@ -1,3 +1,5 @@
+#pragma once
+
 #include <limits.h>
 #include <sys/wait.h>
 #include <signal.h>

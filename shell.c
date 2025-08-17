@@ -37,9 +37,18 @@ static command* parse_cmd(char* cmd_as_string, size_t max_args) {
     }
 
     for (size_t i = 0; i < counter; ++i) {
+        if (tokens[i][0] == '$') {
+            tokens[i] = get_var(tokens[i] + 1);
+
+            if (tokens[i] == NULL) {
+                fprintf(stderr, "no variable with this name\n");
+                return NULL;
+            }
+        }
+
         if (strcmp(tokens[i], "<") == 0) {
             if (i + 1 == counter) {
-                fprintf(stderr, "no filename after <");
+                fprintf(stderr, "no filename after <\n");
                 return NULL;
             }
             
@@ -49,7 +58,7 @@ static command* parse_cmd(char* cmd_as_string, size_t max_args) {
         }
         else if (strcmp(tokens[i], ">") == 0) {
             if (i + 1 == counter) {
-                fprintf(stderr, "no filename after >");
+                fprintf(stderr, "no filename after >\n");
                 return NULL;
             }
             new_cmd->redirectOutput = tokens[i + 1];
@@ -58,7 +67,7 @@ static command* parse_cmd(char* cmd_as_string, size_t max_args) {
         }
         else if (strcmp(tokens[i], ">>") == 0) {
             if (i + 1 == counter) {
-                fprintf(stderr, "no filename after >>");
+                fprintf(stderr, "no filename after >>\n");
                 return NULL;
             }
             new_cmd->redirectOutput = tokens[i + 1];
@@ -377,6 +386,7 @@ int main(void) {
         tcsetpgrp(shell_tty, shell_pgid);
     }
 
+    load_environment();
     install_all_shell_handlers();
     enable_raw_mode();
 

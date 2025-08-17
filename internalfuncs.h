@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +10,7 @@
 
 #include "proc.h"
 #include "signals.h"
+#include "variables.h"
 
 #define MAX_ARGS 100
 #define MAX_CMDS 100
@@ -51,16 +54,24 @@ void internal_cat(const command*);
 void internal_jobs(const command*);
 void internal_fg(const command*);
 void internal_bg(const command*);
+void internal_env(const command*);
+void internal_set(const command*);
+void internal_export(const command*);
+void internal_unset(const command*);
 
 internal_pair internals[] = {
-    {"echo", internal_echo, 0},  // can run in child
+    {"echo", internal_echo, 0},
     {"pwd", internal_pwd, 0},    // can run in child  
     {"cd", internal_cd, 1},      // MUST run in parent
-    {"ls", internal_ls, 0},      // can run in child
-    {"cat", internal_cat, 0},    // can run in child
-    {"jobs", internal_jobs, 0},    // can run in child
-    {"fg", internal_fg, 1},    // MUST run in parent
-    {"bg", internal_bg, 1},    // MUST run in parent
+    {"ls", internal_ls, 0},
+    {"cat", internal_cat, 0},
+    {"jobs", internal_jobs, 0},
+    {"fg", internal_fg, 1},
+    {"bg", internal_bg, 1},
+    {"env", internal_env, 1},
+    {"set", internal_set, 1},
+    {"unset", internal_unset, 1},
+    {"export", internal_export, 1},
     {NULL, NULL, 0}
 };
 
@@ -81,16 +92,14 @@ int is_parent_builtin(char* cmd) {
 }
 
 void internal_echo(const command* cmd) {
-    printf("GOT HERE");
-
     char buffer[BUFFER_SIZE];
 
     for (size_t i = 1; i < cmd->argc; ++i) {
-        //printf("%s", cmd->argv[i]);
-        //write(STDOUT_FILENO, &cmd->argv[i], sizeof(cmd->argv[i])); 
-        int size = snprintf(buffer, BUFFER_SIZE, "%s", cmd->argv[i]);
+        int size = snprintf(buffer, BUFFER_SIZE, "%s ", cmd->argv[i]);
         write(STDOUT_FILENO, buffer, strlen(buffer));
     }
+    int size = snprintf(buffer, BUFFER_SIZE, "\n");
+    write(STDOUT_FILENO, buffer, strlen(buffer));
 }
 
 void internal_pwd(const command* cmd) {
@@ -319,4 +328,73 @@ void internal_bg(const command* cmd) {
     update_all_processes_in_job(job, JOB_RUNNING);
     
     printf("[%d] %s &\n", job->job_id, job->command_line);
+}
+
+void internal_env(const command* cmd) {
+    if (cmd->argc == 1)
+        print_all_var();
+    else {
+        fprintf(stderr, "env: invalid format, too many arguments\n");
+    }
+}
+
+void internal_set(const const command* cmd) {
+
+    if (cmd->argc < 2) {
+        fprintf(stderr, "set: invalid format, not enough arguments\n");
+        return;
+    }
+    
+    for (int i = 1; i < cmd->argc; i++) {
+        char *eq = strchr(cmd->argv[i], '=');
+        if (!eq) {
+            fprintf(stderr, "set: invalid format, use NAME=value\n");
+            continue;
+        }
+
+        *eq = '\0';
+        const char *name = cmd->argv[i];
+        const char *value = eq + 1;
+        set_var(name, value);
+    }
+
+    return 0;
+}
+
+void internal_export(const const command* cmd) {
+    if (cmd->argc < 2) {
+        fprintf(stderr, "Usage: export VAR\n");
+        return;
+    }
+
+    for (int i = 1; i < cmd->argc; i++) {
+        const char *name = cmd->argv[i];
+        const char *value = get_var(name); 
+
+        if (!value) {
+            fprintf(stderr, "export: variable '%s' not found\n", name);
+            continue;
+        }
+
+        printf("%s, %s\n", name, value);
+        if (setenv(name, value, 1) != 0) {
+            perror("setenv");
+            return;
+        }
+    }
+    return;
+}
+
+void internal_unset(const const command* cmd) {
+    if (cmd->argc < 2) {
+        fprintf(stderr, "Usage: unset VAR\n");
+        return;
+    }
+
+    for (int i = 1; i < cmd->argc; i++) {
+        const char *name = cmd->argv[i];
+        unset_var(name);
+        unsetenv(name);
+    }
+    return;
 }
