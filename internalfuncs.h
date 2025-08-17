@@ -7,17 +7,13 @@
 #include <fcntl.h>
 
 #include "proc.h"
+#include "signals.h"
 
 #define MAX_ARGS 100
 #define MAX_CMDS 100
 #define MAX_PROCESSES 100
 #define MAX_GLOBAL_PROCESSES 10000
 #define BUFFER_SIZE 4096
-
-static int shell_interactive = 0;
-static pid_t shell_pgid = 0;
-static int shell_tty = -1;
-static volatile sig_atomic_t fg_pgid = 0;
 
 struct command_inter {
     size_t argc;
@@ -85,8 +81,16 @@ int is_parent_builtin(char* cmd) {
 }
 
 void internal_echo(const command* cmd) {
-    for (size_t i = 1; i < cmd->argc; ++i)
-        printf("%s", cmd->argv[i]);
+    printf("GOT HERE");
+
+    char buffer[BUFFER_SIZE];
+
+    for (size_t i = 1; i < cmd->argc; ++i) {
+        //printf("%s", cmd->argv[i]);
+        //write(STDOUT_FILENO, &cmd->argv[i], sizeof(cmd->argv[i])); 
+        int size = snprintf(buffer, BUFFER_SIZE, "%s", cmd->argv[i]);
+        write(STDOUT_FILENO, buffer, strlen(buffer));
+    }
 }
 
 void internal_pwd(const command* cmd) {

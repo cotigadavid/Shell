@@ -2,7 +2,9 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
-#include "internalfuncs.h"
+#include <termios.h>
+
+#include "input.h"
 
 static void free_pipeline_mem(pipeline* p) {
     if (!p) return;
@@ -153,109 +155,6 @@ static void duplicate_fd(command* cmd) {
         
         close(fd);
     }
-}
-
-static void give_terminal_to(pid_t pgid) {
-    if (!shell_interactive) return;
-    if (pgid <= 0) return;
-    tcsetpgrp(shell_tty, pgid);
-}
-
-static void reclaim_terminal(void) {
-    if (!shell_interactive) return;
-    tcsetpgrp(shell_tty, shell_pgid);
-}
-
-static volatile sig_atomic_t child_status_changed = 0;
-
-void sigchld_handler(int sig) {
-    (void)sig;
-    child_status_changed = 1;
-}
-
-static void sigint_handler(int sig) {
-    (void)sig;
-    pid_t pgid = fg_pgid;
-    if (pgid > 0) killpg(pgid, SIGINT);
-}
-
-static void sigtstp_handler(int sig) {
-    (void)sig;
-    pid_t pgid = fg_pgid;
-    if (pgid > 0) killpg(pgid, SIGTSTP);
-}
-
-static void ignore_signal(int signo) {
-    struct sigaction sa;
-    sa.sa_handler = SIG_IGN;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    sigaction(signo, &sa, NULL);
-}
-
-static void set_handler(int signo, void (*handler)(int)) {
-    struct sigaction sa;
-    sa.sa_handler = handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    sigaction(signo, &sa, NULL);
-}
-
-static void install_all_shell_handlers(void) {
-    set_handler(SIGCHLD, sigchld_handler);
-
-    set_handler(SIGINT,  sigint_handler);
-    set_handler(SIGTSTP, sigtstp_handler);
-
-    ignore_signal(SIGTTOU);
-    ignore_signal(SIGTTIN);
-}
-
-void check_child_status(void) {
-    if (!child_status_changed) {
-        return;
-    }
-    
-    child_status_changed = 0;
-    
-    int status;
-    pid_t pid;
-    
-    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
-        pid_t pgid = get_pgid_of_process(pid);
-        if (pgid == -1) {
-            continue; 
-        }
-        
-        job_t* job = find_job_by_pgid(pgid);
-        if (job == NULL) {
-            continue;
-        }
-
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            update_job_status(job, pid, JOB_DONE);
-        } else if (WIFSTOPPED(status)) {
-            update_job_status(job, pid, JOB_STOPPED);
-        } else if (WIFCONTINUED(status)) {
-            update_job_status(job, pid, JOB_RUNNING);
-        }
-    }
-}
-
-static void setup_child_signals_and_pgrp(pid_t pg_leader_pgid, int is_fg) {
-
-    signal(SIGINT,  SIG_DFL);
-    signal(SIGTSTP, SIG_DFL);
-    signal(SIGTTOU, SIG_DFL);
-    signal(SIGTTIN, SIG_DFL);
-    signal(SIGCHLD, SIG_DFL);
-
-    if (pg_leader_pgid == 0) {
-        setpgid(0, 0);
-    } else {
-        setpgid(0, pg_leader_pgid);
-    }
-
 }
 
 static void execute_pipeline(pipeline* curr_pipeline) {
@@ -462,7 +361,7 @@ static void execute_single_command(pipeline* curr_pipeline) {
     }
 }
 
-int main() {
+int main(void) {
     shell_tty = STDIN_FILENO;
     shell_interactive = isatty(shell_tty);
 
@@ -475,43 +374,33 @@ int main() {
             }
             shell_pgid = getpgrp();
         }
-
         tcsetpgrp(shell_tty, shell_pgid);
     }
 
     install_all_shell_handlers();
+    enable_raw_mode();
 
-    char* buffer = NULL;
-    size_t bufferSize = 0;
-    ssize_t lineLen;
+    char input[INPUT_BUF];
 
     while (1) {
-        printf("shell:~");
-        internal_pwd(&command_default);
-        printf("$ ");
-        fflush(stdout);
-
         check_child_status();
 
-        lineLen = getline(&buffer, &bufferSize, stdin);
+        read_line(input);
 
-        if (lineLen == -1) {
-            if (feof(stdin)) {
-                printf("\nExit shell.\n");
-            } else {
-                perror("getline");
-            }
+        // Trim newline
+        size_t len = strlen(input);
+        if (len > 0 && input[len - 1] == '\n')
+            input[len - 1] = '\0';
+
+        // Skip empty lines
+        if (input[0] == '\0') continue;
+
+        add_history(input);
+
+        if (strcmp(input, "exit") == 0)
             break;
-        }
 
-        if (lineLen > 0 && buffer[lineLen - 1] == '\n') {
-            buffer[lineLen - 1] = '\0';
-            lineLen--;
-        }
-
-        if (lineLen == 0) continue;
-
-        pipeline* curr_pipeline = parse_input(buffer, MAX_CMDS);
+        pipeline* curr_pipeline = parse_input(input, MAX_CMDS);
         if (curr_pipeline == NULL) continue;
 
         if (curr_pipeline->cmdc == 1) {
@@ -524,6 +413,5 @@ int main() {
         free_pipeline_mem(curr_pipeline);
     }
 
-    free(buffer);
     return 0;
 }
