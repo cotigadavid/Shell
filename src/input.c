@@ -1,14 +1,8 @@
-#pragma once
+#include "../headers/input.h"
 
-#include <limits.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <unistd.h>
-#include <termios.h>
-
-#include "internalfuncs.h"
-
-struct termios orig_termios;
+char *history[HISTORY_MAX];
+int history_len = 0;
+int history_index = 0;
 
 void disable_raw_mode() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
@@ -23,11 +17,6 @@ void enable_raw_mode() {
     //raw.c_lflag &= ~(ISIG);          // disable signals (Ctrl+C, Ctrl+Z)
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
-
-#define ARROW_UP    1000
-#define ARROW_DOWN  1001
-#define ARROW_RIGHT 1002
-#define ARROW_LEFT  1003
 
 int read_key() {
     char c;
@@ -51,12 +40,6 @@ int read_key() {
     return c;
 }
 
-#define HISTORY_MAX 100
-
-char *history[HISTORY_MAX];
-int history_len = 0;
-int history_index = 0; // for navigation
-
 void add_history(const char *cmd) {
     if (history_len < HISTORY_MAX) {
         history[history_len++] = strdup(cmd);
@@ -68,7 +51,6 @@ void add_history(const char *cmd) {
     }
 }
 
-#define INPUT_BUF 1024
 
 void redraw_prompt(const char *buf) {
     // Move cursor to start of line and clear it

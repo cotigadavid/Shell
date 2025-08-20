@@ -1,16 +1,4 @@
-#pragma once
-
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-
-extern char **environ;
-
-typedef struct var {
-    char* name;
-    char* value;
-    struct var* next;
-} var_t;
+#include "../headers/variables.h"
 
 var_t* var_list = NULL;
 

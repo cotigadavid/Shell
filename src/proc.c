@@ -1,36 +1,4 @@
-#pragma once
-
-#include <limits.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <stdbool.h>
-#include <unistd.h>
-
-#define MAX_ARGS 100
-#define MAX_CMDS 100
-#define MAX_PROCESSES 100
-#define MAX_GLOBAL_PROCESSES 10000
-#define BUFFER_SIZE 4096
-
-#define JOB_RUNNING 0
-#define JOB_STOPPED 1
-#define JOB_DONE    2
-
-typedef struct {
-    pid_t pid;
-    pid_t pgid;
-    int status;
-} process;
-
-typedef struct job {
-    int job_id;
-    pid_t pgid;
-    char* command_line;
-    int status;
-    struct job* next;
-    process* process_list[MAX_PROCESSES];
-    int process_counter;
-} job_t;
+#include "../headers/proc.h"
 
 job_t* job_list = NULL;
 int last_id = 0;
@@ -44,8 +12,6 @@ pid_t get_pgid_of_process(pid_t pid) {
             return global_process_list[i]->pgid;
 
 }
-
-struct pipeline;
 
 job_t* add_job(pid_t pgid, const char* command_line, struct pipeline* p) {
     job_t* new_job = (job_t*)malloc(sizeof(job_t));
