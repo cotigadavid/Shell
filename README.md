@@ -61,6 +61,21 @@ make
 ./shell
 ```
 
+### Or...
+
+1. **Download the released executable**
+
+2. **Add executable permission**  
+If you get permission denied, run:
+```bash
+chmod +x shell
+```
+
+3. **Run the shell:**
+```bash
+./shell
+```
+
 ## Usage Examples
 
 ### Basic Commands
